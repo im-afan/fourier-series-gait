@@ -35,4 +35,10 @@ class FourierSeriesAgent():
             return res / self.max_vals
         return res
 
+    def save(self, checkpoint="saved_agents/best_agent.npy"):
+        np.save(checkpoint, self.coefs)
+
+    def load(self, checkpoint="saved_agents/best_agent.npy"):
+        self.coefs = np.load(checkpoint)
+
 

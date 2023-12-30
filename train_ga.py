@@ -7,18 +7,22 @@ import time
 from threading import Thread
 from multiprocessing import Process
 import copy
+#from torch.utils.tensorboard import SummaryWriter
 
 class GATrainer():
     def __init__(
         self,
         env,
         population,
-        mutation_coef_min=0.8,
-        mutation_coef_max=1.2,
+        mutation_coef_min=0.9,
+        mutation_coef_max=1.1,
         coef_min=0.0,
         coef_max=1.0,
-        n_frequencies=3,
-        freq_step=0.01
+        n_frequencies=5,
+        freq_step=0.01,
+        kp=0.1,
+        checkpoint_path="saved_agents/best_agent.npy",
+        tensorboard_path="tensorboard/"
     ):
         self.env = env
         self.coef_min = coef_min
@@ -28,6 +32,11 @@ class GATrainer():
         self.freq_step = freq_step
         self.population = population
         self.n_frequencies = n_frequencies
+        self.kp = kp
+        self.checkpoint_path = checkpoint_path
+        self.tensorboard_path = tensorboard_path
+        #self.writer = SummaryWriter(log_dir=tensorboard_path)
+        #print("here\n\nasdfasdf\nasdfadf")
 
         self.agents = []
 
@@ -48,7 +57,7 @@ class GATrainer():
             self.agents.append(FourierSeriesAgent(coefs))
 
     def agent_reward(self, agent, env, procnum, return_dict, ep_length=1000):
-        t = 0
+        """t = 0
         total_reward = 0
         obs, _ = env.reset()
         for i in range(ep_length):
@@ -65,7 +74,34 @@ class GATrainer():
             #print(i)
             t += 1
         #print(total_reward)
+        return_dict[procnum] = total_reward"""
+        t = 0
+        total_reward = 0
+        obs, _ = env.reset()
+
+        for i in range(1000):
+            # from documentation: action = hip_4, angle_4, hip_1, angle_1, hip_2, angle_2, hip_3, angle_3
+            # observation: hip_4=11, ankle_4=12, hip_1=5, ankle_1=6, hip_2=7, ankle_2=8 hip_3=9, ankle_3=10
+            joint_state = np.array([obs[11], obs[12], obs[5], obs[6], obs[7], obs[8], obs[9], obs[10]]) 
+            #print(joint_state)
+
+            wanted_state = agent.sample(i, L=10, deriv=False, norm=False)
+            #wanted_state += np.array([0, 1, 0, 1, 0, 1, 0, 1]) #manually change center of mass for some of htem lmao
+        
+            action = self.kp * (wanted_state-joint_state)
+            obs, reward, _, _, _ = env.step(action)
+            total_reward += reward
+            t += 1
+
+            """ logging for tests
+            states.append(joint_state)
+            wanted_states.append(wanted_state)
+            times.append(i)
+            actions.append(action)
+            """
+
         return_dict[procnum] = total_reward
+
 
     def sample_mutation(self):
         return np.random.uniform(
@@ -74,7 +110,7 @@ class GATrainer():
             size=(self.action_dim, self.n_frequencies, 2)
         )
 
-    def train_step(self, ep_length=1000):
+    def train_step(self, generation=0, ep_length=1000):
         """agent_rewards = []
         t = []
         for i in range(len(self.agents)):
@@ -95,7 +131,7 @@ class GATrainer():
         for p in jobs:
             p.join()
         for i in range(self.population):
-            print("reward: {}".format(return_dict[i]))
+            #print("reward: {}".format(return_dict[i]))
             agent_rewards.append((self.agents[i], return_dict[i]))
         #print(return_dict)
         #for i in range(len(t)):
@@ -105,6 +141,8 @@ class GATrainer():
 
         agent_rewards.sort(key = lambda x: x[1], reverse=True)
         print("best reward: {}".format(agent_rewards[0][1]))
+        agent_rewards[0][0].save()
+        #self.writer.add_scalar("reward", agent_rewards[0][1], generation)
         self.agents.clear()
         for i in range(self.population // 2):
             coefs = agent_rewards[i][0].coefs
@@ -113,10 +151,12 @@ class GATrainer():
 
     def train(self, generations=1000):
         for i in range(generations):
-            self.train_step()
+            self.train_step(generation=i)
 
 if(__name__ == "__main__"):
     #env = gym.make("AntBulletEnv-v0", render_mode="rgb_array")
-    env = gym.make("AntBulletEnv-v0")
+    #env = gym.make("AntBulletEnv-v0", render_mode="human")
+    #env = gym.make("Ant-v4", reset_noise_scale=0, render_mode="human")
+    env = gym.make("Ant-v4", reset_noise_scale=0)
     trainer = GATrainer(env, 50)
     trainer.train()

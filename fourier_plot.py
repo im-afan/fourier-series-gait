@@ -11,10 +11,11 @@ agent = FourierSeriesAgent(np.array([[[0, 0], [0, 1], [0, 0], [0, 0.33], [0, 0],
 dx, dy = [], []
 x, y = [], []
 for i in range(1000):
-    t = i/100
+    #t = i/100
+    t = i
 
     x.append(t)
-    y.append(agent.sample(t, deriv=False, L=1)[0])
+    y.append(agent.sample(t, deriv=False, L=100)[0])
     dx.append(t)
     dy.append(agent.sample(t, deriv=True, L=1)[0])
 
