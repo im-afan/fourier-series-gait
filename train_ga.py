@@ -7,36 +7,70 @@ import time
 from threading import Thread
 from multiprocessing import Process
 import copy
+import torch
+from torch import nn
+import matplotlib.pyplot as plt
 #from torch.utils.tensorboard import SummaryWriter
+
+class RewardPredictor(nn.Module):
+    def __init__(
+        self, 
+        action_size : int, 
+        n_frequencies : int, 
+        hidden_size: int = 64
+    ):
+        super().__init__()
+        self.dense1 = nn.Linear(action_size*n_frequencies*2 + 1, hidden_size)
+        self.dense2 = nn.Linear(hidden_size, hidden_size)
+        self.dense3 = nn.Linear(hidden_size, hidden_size)
+        self.dense4 = nn.Linear(hidden_size, 1)
+        self.layers = [
+            self.dense1,
+            nn.LeakyReLU(),
+            self.dense2,
+            nn.LeakyReLU(),
+            self.dense3,
+            nn.LeakyReLU(),
+            self.dense4,
+            nn.Tanh(),
+        ]
+
+    def forward(self, coefs, L):
+        x = torch.tensor(coefs.flatten())
+        x = torch.cat([x, torch.tensor([L])])
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
 
 class GATrainer():
     def __init__(
         self,
         env,
         population,
-        mutation_coef_min=0.9,
-        mutation_coef_max=1.1,
+        mutation_range = 0.2,
         coef_min=0.0,
         coef_max=1.0,
         n_frequencies=5,
         freq_step=0.01,
         kp=0.1,
+        epochs=10,
+        samples_per_epoch=50,
         checkpoint_path="saved_agents/best_agent.npy",
         tensorboard_path="tensorboard/"
     ):
         self.env = env
         self.coef_min = coef_min
         self.coef_max = coef_max
-        self.mutation_coef_min = mutation_coef_min
-        self.mutation_coef_max = mutation_coef_max
+        self.mutation_range = mutation_range
         self.freq_step = freq_step
         self.population = population
         self.n_frequencies = n_frequencies
         self.kp = kp
+        self.epochs = epochs
+        self.samples_per_epoch = samples_per_epoch
         self.checkpoint_path = checkpoint_path
         self.tensorboard_path = tensorboard_path
-        #self.writer = SummaryWriter(log_dir=tensorboard_path)
-        #print("here\n\nasdfasdf\nasdfadf")
 
         self.agents = []
 
@@ -56,25 +90,22 @@ class GATrainer():
 
             self.agents.append(FourierSeriesAgent(coefs))
 
+        self.reward_predictor = RewardPredictor(action_size=self.action_dim, n_frequencies=self.n_frequencies)
+        self.optimizer = torch.optim.Adam(self.reward_predictor.parameters(), lr=0.001)
+        self.loss_fn = nn.MSELoss()
+        self.dataset = []
+
+        self.reward_predictor.double()
+
+    def normalize_reward(self, x, inverse=False): #hard coded once again woohoo!
+        if(inverse):
+            return np.arctanh(x) * 2000
+        return np.tanh(x/2000)
+
+    def calc_num_simulate(self, x):
+        return int(-(self.population//2)*np.tanh((x-500)/400) + self.population//2)
+
     def agent_reward(self, agent, env, procnum, return_dict, ep_length=1000):
-        """t = 0
-        total_reward = 0
-        obs, _ = env.reset()
-        for i in range(ep_length):
-            #wanted_pos = self.agents[ind].sample(t, L=100, deriv=False)
-            #time.sleep(0.01)
-            # from documentation: action = hip_4, angle_4, hip_1, angle_1, hip_2, angle_2, hip_3, angle_3
-            # observation: hip_4=11, ankle_4=12, hip_1=5, ankle_1=6, hip_2=7, ankle_2=8 hip_3=9, ankle_3=10
-            joint_state = np.array([obs[11], obs[12], obs[5], obs[6], obs[7], obs[8], obs[9], obs[10]]) 
-            wanted_state = agent.sample(t, L=100, deriv=False, norm=True)
-            
-            _, reward, _, _, _ = env.step(wanted_state-joint_state)
-            total_reward += reward
-            #t += self.freq_step
-            #print(i)
-            t += 1
-        #print(total_reward)
-        return_dict[procnum] = total_reward"""
         t = 0
         total_reward = 0
         obs, _ = env.reset()
@@ -83,10 +114,8 @@ class GATrainer():
             # from documentation: action = hip_4, angle_4, hip_1, angle_1, hip_2, angle_2, hip_3, angle_3
             # observation: hip_4=11, ankle_4=12, hip_1=5, ankle_1=6, hip_2=7, ankle_2=8 hip_3=9, ankle_3=10
             joint_state = np.array([obs[11], obs[12], obs[5], obs[6], obs[7], obs[8], obs[9], obs[10]]) 
-            #print(joint_state)
 
-            wanted_state = agent.sample(i, L=10, deriv=False, norm=False)
-            #wanted_state += np.array([0, 1, 0, 1, 0, 1, 0, 1]) #manually change center of mass for some of htem lmao
+            wanted_state = agent.sample(i, deriv=False, norm=False)
         
             action = self.kp * (wanted_state-joint_state)
             obs, reward, _, _, _ = env.step(action)
@@ -103,55 +132,78 @@ class GATrainer():
         return_dict[procnum] = total_reward
 
 
-    def sample_mutation(self):
+    def sample_coef_mutation(self, reward):
+        new_range = self.mutation_range * 100/(reward-1000) #hard coded from mujoco env, todo 
         return np.random.uniform(
-            low=self.mutation_coef_min, 
-            high=self.mutation_coef_max, 
+            low=1-new_range, 
+            high=1+new_range, 
             size=(self.action_dim, self.n_frequencies, 2)
         )
 
-    def train_step(self, generation=0, ep_length=1000):
-        """agent_rewards = []
-        t = []
-        for i in range(len(self.agents)):
-            t.append(ProcessWithReturn(target=self.agent_reward, args=[copy.deepcopy(self.agents[i]), copy.deepcopy(self.env)]))
-        for i in range(len(t)):
-            t[i].start()
-        for i in range(len(t)):
-            agent_rewards.append((self.agents[i], t[i].join()))"""
+    def sample_L_mutation(self, reward):
+        new_range = self.mutation_range * 100/(reward-1000) #hard coded from mujoco env, todo 
+        return np.random.uniform(
+            low=1-new_range,
+            high=1+new_range,
+        )
+
+    def train_step(self, generation=0, ep_length=1000, num_simulate=50):
         agent_rewards = []
+
         manager = multiprocessing.Manager()
         return_dict = manager.dict()
         jobs = []
-        for i in range(self.population):
-            #p = multiprocessing.Process(target=self.agent_reward, args=[copy.deepcopy(self.agents[i]), copy.deepcopy(self.env), i, return_dict])
+        for i in range(num_simulate):
             p = multiprocessing.Process(target=self.agent_reward, args=[copy.deepcopy(self.agents[i]), self.env, i, return_dict])
             jobs.append(p)
             p.start()
         for p in jobs:
             p.join()
+
+        for i in range(num_simulate):
+            self.dataset.append((self.agents[i], return_dict[i]))
+            
+        for epoch in range(self.epochs):
+            running_loss = 0
+            l = max(0, len(self.dataset)-1-self.samples_per_epoch)
+            r = len(self.dataset)-1
+            for i in range(l, r+1):
+                self.optimizer.zero_grad()
+                logit = self.reward_predictor(self.dataset[i][0].coefs, self.dataset[i][0].L)
+                label = torch.tensor([self.normalize_reward(self.dataset[i][1])])
+                loss = self.loss_fn(logit, label)
+                running_loss += loss
+                loss.backward()
+                self.optimizer.step()
+            print("model loss: {}".format(running_loss))
+
+
+        x, y = [], []
         for i in range(self.population):
-            #print("reward: {}".format(return_dict[i]))
-            agent_rewards.append((self.agents[i], return_dict[i]))
-        #print(return_dict)
-        #for i in range(len(t)):
-        #    agent_rewards.append((self.agents[i], t[i].get_return()))
-            #print("reward: {}".format(agent_rewards[i][1]))
-        #sort(self.agents) 
+            reward = self.reward_predictor(self.agents[i].coefs, self.agents[i].L).detach().numpy()
+            #print("reward: {}, predicted: {}".format(self.normalize_reward(return_dict[i]), reward))
+            #x.append(return_dict[i])
+            #y.append(self.normalize_reward(reward, inverse=True))
+            agent_rewards.append((self.agents[i], reward[0]))
+        #plt.scatter(x, y)
+        #plt.show()
 
         agent_rewards.sort(key = lambda x: x[1], reverse=True)
-        print("best reward: {}".format(agent_rewards[0][1]))
+        best_reward = agent_rewards[0][1]
+        print("best reward: {}".format(best_reward))
         agent_rewards[0][0].save()
-        #self.writer.add_scalar("reward", agent_rewards[0][1], generation)
         self.agents.clear()
         for i in range(self.population // 2):
             coefs = agent_rewards[i][0].coefs
-            self.agents.append(FourierSeriesAgent(coefs * self.sample_mutation()))
-            self.agents.append(FourierSeriesAgent(coefs * self.sample_mutation()))
+            L = agent_rewards[i][0].L
+            self.agents.append(FourierSeriesAgent(coefs * self.sample_coef_mutation(reward=best_reward), L*self.sample_L_mutation(reward=best_reward)))
+            self.agents.append(FourierSeriesAgent(coefs * self.sample_coef_mutation(reward=best_reward), L*self.sample_L_mutation(reward=best_reward)))
+        np.random.shuffle(self.agents)
 
     def train(self, generations=1000):
         for i in range(generations):
-            self.train_step(generation=i)
+            self.train_step(generation=i, num_simulate=self.calc_num_simulate(i))
+            #self.train_step(generation=i, num_simulate=50)
 
 if(__name__ == "__main__"):
     #env = gym.make("AntBulletEnv-v0", render_mode="rgb_array")

@@ -31,7 +31,7 @@ for i in range(1000):
     joint_state = np.array([obs[11], obs[12], obs[5], obs[6], obs[7], obs[8], obs[9], obs[10]]) 
     print(joint_state)
 
-    wanted_state = 0.25 * agent.sample(i, L=10, deriv=False, norm=False)
+    wanted_state = 0.25 * agent.sample(i, deriv=False, norm=False)
     wanted_state += np.array([0, 1, 0, 1, 0, 1, 0, 1]) #manually change center of mass for some of htem lmao
    
     action = kp * (wanted_state-joint_state)

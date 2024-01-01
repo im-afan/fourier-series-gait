@@ -15,7 +15,6 @@ class GATester():
         n_frequencies=5,
         freq_step=0.01,
         kp=0.1,
-        checkpoint="saved_agents/best_agent.npy"
     ):
         self.env = env
         self.freq_step = freq_step
@@ -24,7 +23,7 @@ class GATester():
         self.action_dim = env.action_space.shape[0]
 
         self.agent = FourierSeriesAgent(np.zeros((self.action_dim, n_frequencies, 2)))
-        self.agent.load(checkpoint)
+        self.agent.load()
         
     def test(self, timesteps=10000):
         t = 0
@@ -36,7 +35,7 @@ class GATester():
             # observation: hip_4=11, ankle_4=12, hip_1=5, ankle_1=6, hip_2=7, ankle_2=8 hip_3=9, ankle_3=10
             joint_state = np.array([obs[11], obs[12], obs[5], obs[6], obs[7], obs[8], obs[9], obs[10]]) 
 
-            wanted_state = self.agent.sample(i, L=10, deriv=False, norm=False)
+            wanted_state = self.agent.sample(i, deriv=False, norm=False)
         
             action = self.kp * (wanted_state-joint_state)
             obs, reward, _, _, _ = env.step(action)
