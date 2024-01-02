@@ -48,7 +48,7 @@ class GATrainer():
         self,
         env,
         population,
-        mutation_range = 0.2,
+        mutation_range = 0.1,
         coef_min=0.0,
         coef_max=1.0,
         n_frequencies=5,
