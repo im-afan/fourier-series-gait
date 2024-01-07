@@ -48,14 +48,14 @@ class GATrainer():
         self,
         env,
         population,
-        mutation_range = 0.2,
+        mutation_range = 0.1,
         coef_min=0.0,
         coef_max=1.0,
         n_frequencies=5,
         freq_step=0.01,
         kp=0.1,
         epochs=10,
-        samples_per_epoch=50,
+        samples_per_epoch=100,
         checkpoint_path="saved_agents/best_agent.npy",
         tensorboard_path="tensorboard/"
     ):
@@ -162,20 +162,20 @@ class GATrainer():
 
         for i in range(num_simulate):
             self.dataset.append((self.agents[i], return_dict[i]))
-            
-        for epoch in range(self.epochs):
-            running_loss = 0
-            l = max(0, len(self.dataset)-1-self.samples_per_epoch)
-            r = len(self.dataset)-1
-            for i in range(l, r+1):
-                self.optimizer.zero_grad()
-                logit = self.reward_predictor(self.dataset[i][0].coefs, self.dataset[i][0].L)
-                label = torch.tensor([self.normalize_reward(self.dataset[i][1])])
-                loss = self.loss_fn(logit, label)
-                running_loss += loss
-                loss.backward()
-                self.optimizer.step()
-            print("model loss: {}".format(running_loss))
+        
+        running_loss = 0
+        l = max(0, len(self.dataset)-1-self.samples_per_epoch)
+        r = len(self.dataset)-1
+        for i in range(self.samples_per_epoch):
+            i = np.random.randint(l, r)
+            self.optimizer.zero_grad()
+            logit = self.reward_predictor(self.dataset[i][0].coefs, self.dataset[i][0].L)
+            label = torch.tensor([self.normalize_reward(self.dataset[i][1])])
+            loss = self.loss_fn(logit, label)
+            running_loss += loss
+            loss.backward()
+            self.optimizer.step()
+        #print("model loss: {}".format(running_loss))
 
 
         x, y = [], []
@@ -190,13 +190,13 @@ class GATrainer():
 
         agent_rewards.sort(key = lambda x: x[1], reverse=True)
         best_reward = agent_rewards[0][1]
-        print("best reward: {}".format(best_reward))
+        print("best reward: {}".format(self.normalize_reward(best_reward, inverse=True)))
         agent_rewards[0][0].save()
         self.agents.clear()
         for i in range(self.population // 2):
             coefs = agent_rewards[i][0].coefs
             L = agent_rewards[i][0].L
-            self.agents.append(FourierSeriesAgent(coefs * self.sample_coef_mutation(reward=best_reward), L*self.sample_L_mutation(reward=best_reward)))
+            self.agents.append(agent_rewards[i][0])
             self.agents.append(FourierSeriesAgent(coefs * self.sample_coef_mutation(reward=best_reward), L*self.sample_L_mutation(reward=best_reward)))
         np.random.shuffle(self.agents)
 
