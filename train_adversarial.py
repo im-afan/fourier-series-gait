@@ -9,7 +9,7 @@ from multiprocessing import Process
 import copy
 import torch
 from torch import nn
-from torch.optim import Adam
+from torch.optim import Adam, RMSprop
 import matplotlib.pyplot as plt
 #from torch.utils.tensorboard import SummaryWriter
 
@@ -39,7 +39,7 @@ class Value(nn.Module):
             #nn.Dropout(),
             nn.Mish(),
             self.dense4,
-            nn.BatchNorm1d(1),
+            #nn.BatchNorm1d(1),
             nn.Sigmoid(),
         )
         self.double()
@@ -79,7 +79,7 @@ class Generator(nn.Module):
             nn.Mish(),
             self.dense4,
             nn.BatchNorm1d(action_size*n_frequencies*2+1),
-            nn.Sigmoid(),
+            #nn.Sigmoid(),
         )
         self.double()
 
@@ -92,7 +92,7 @@ class Trainer:
         action_size : int,
         n_frequencies : int = 5, 
         gen_noise_size : int = 16,
-        gen_hidden_size : int = 128,
+        gen_hidden_size : int = 64,
         val_hidden_size : int = 128,
         kp : float = 0.01,
     ):
@@ -108,16 +108,6 @@ class Trainer:
         
         self.dataset_train = []
         self.dataset_test = []
-
-    def normalize_reward1(self, x, inverse=False): #hard coded once again woohoo!
-        if(inverse):
-            return 500*np.arctanh(2*x-1) + 1500 
-        return (np.tanh((x-1500)/500)+1)/2
-
-    def normalize_reward(self, x, inverse=False):
-        if(inverse):
-            return x * 200 + 900
-        return (x-900) / 200
 
     def vec_test(self, agents):
         envs = gym.vector.make("Ant-v4", num_envs=len(agents), reset_noise_scale=0)
@@ -148,14 +138,15 @@ class Trainer:
         
         return total_reward
 
-    def train(self, epochs=1000, batch_size=32, value_samples=16):
-        gen_optim = Adam(self.generator.parameters())
-        val_optim = Adam(self.value.parameters())
+    def train(self, epochs=1000, batch_size=32, val_batch_size=4, value_samples=32):
+        gen_optim = RMSprop(self.generator.parameters(), lr=0.001)
+        val_optim = RMSprop(self.value.parameters(), lr=0.001)
         gen_loss_fn = nn.BCELoss()
-        val_loss_fn = nn.HuberLoss()
+        val_loss_fn = nn.BCELoss()
+        #noise = torch.rand((batch_size, self.gen_noise_size), dtype=torch.double)
         for i in range(epochs):
             print("epoch %d" % i)
-            gen_optim.zero_grad()
+            #gen_optim.zero_grad()
 
             noise = torch.rand((batch_size, self.gen_noise_size), dtype=torch.double)
             generated = self.generator(noise)
@@ -177,14 +168,17 @@ class Trainer:
                 coefs = simulate[j][:-1].reshape((self.action_size, self.n_frequencies, 2))
                 L = simulate[j][-1]
                 simulate_agents.append(FourierSeriesAgent(coefs=coefs, L=L))
-            actual_rewards = self.vec_test(simulate_agents)
-            print(actual_rewards)
-            for j in range(value_samples):
-                if(j < 12):
-                    self.dataset_train.append((simulate[j], self.normalize_reward(actual_rewards[j])))
-                else:
-                    self.dataset_test.append((simulate[j], self.normalize_reward(actual_rewards[j])))
 
+            #if(i == 0): #debug
+            actual_rewards = self.vec_test(simulate_agents)
+
+            for j in range(value_samples):
+                if(j < 9 * value_samples // 10):
+                    self.dataset_train.append((simulate[j], actual_rewards[j]))
+                else:
+                    self.dataset_test.append((simulate[j], actual_rewards[j]))
+
+            """
             for l in range(3):
                 val_optim.zero_grad()
                 logits, labels = [], []
@@ -213,18 +207,50 @@ class Trainer:
                 output_test = self.value(logits_test)
                 val_loss_test = val_loss_fn(output_test.squeeze(), labels_test)
                 print("value test loss: {}".format(val_loss_test))
+            """
+            for val_epoch in range(10):
+                val_optim.zero_grad()
+                samples, rewards = [], []
+                best_reward, best_ind = 0, 0
+                for j in range(val_batch_size): # todo: use a different hyperparameter (this one  is the same number as # of generated samples per generation)
+                    #if(j < 9 * value_samples // 10):
+                    if(False):
+                        k = len(self.dataset_train)-j-1
+                    else:
+                        k = np.random.randint(len(self.dataset_train))
+                    samples.append(self.dataset_train[k][0])
+                    rewards.append(self.dataset_train[k][1])
+                    if(rewards[j] > best_reward):
+                        best_reward = rewards[j]
+                        best_ind = j
+                #r = list(range(len(samples)))
+                #r.sort(key = lambda x: rewards[x])
+                #logits = [samples[i] for i in r]
+                #logits = torch.tensor(np.array(logits))
+                logits = torch.tensor(np.array(samples))
+                labels = torch.zeros((val_batch_size), dtype=torch.double)
+                labels[best_ind] = 1
+                #labels = torch.cat((torch.ones(batch_size//4, dtype=torch.double), torch.zeros(batch_size - batch_size//4, dtype=torch.double)))
+                output = self.value(logits)
+                val_loss = val_loss_fn(output.squeeze(), labels)
+                print("value loss: {}".format(val_loss))
+                val_loss.backward()
+                val_optim.step()
             
             predicted_value_test = self.value(torch.tensor(np.array(simulate)))
-            print(self.normalize_reward(predicted_value_test.detach().numpy(), inverse=True).squeeze())
-            
-            #plt.scatter(actual_rewards, self.normalize_reward(predicted_value_test.detach().numpy(), inverse=True))
-            #plt.show()
+            np.set_printoptions(linewidth=200)
+            print(actual_rewards)
+            print(predicted_value_test.detach().numpy().squeeze())
+          
+            plt.figure()
+            plt.scatter(actual_rewards, predicted_value_test.detach().numpy())
+            plt.savefig("figs/"  + str(i) + ".png")
 
             predicted_value = self.value(generated)
             
-            gen_loss = gen_loss_fn(predicted_value.squeeze(), torch.ones((batch_size), dtype=torch.double))
-            gen_loss.backward()
-            gen_optim.step()
+            #gen_loss = gen_loss_fn(predicted_value.squeeze(), torch.ones((batch_size), dtype=torch.double))
+            #gen_loss.backward()
+            #gen_optim.step()
 
 
 if __name__ == "__main__":
