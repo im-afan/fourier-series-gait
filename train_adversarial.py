@@ -27,15 +27,15 @@ class Value(nn.Module):
         self.dense4 = nn.Linear(hidden_size, 1)
         self.seq = nn.Sequential(
             self.dense1,
-            nn.BatchNorm1d(hidden_size),
+            #nn.BatchNorm1d(hidden_size),
             #nn.Dropout(),
             nn.Mish(),
             self.dense2,
-            nn.BatchNorm1d(hidden_size),
+            #nn.BatchNorm1d(hidden_size),
             #nn.Dropout(),
             nn.Mish(),
             self.dense3,
-            nn.BatchNorm1d(hidden_size),
+            #nn.BatchNorm1d(hidden_size),
             #nn.Dropout(),
             nn.Mish(),
             self.dense4,
@@ -92,8 +92,8 @@ class Trainer:
         action_size : int,
         n_frequencies : int = 5, 
         gen_noise_size : int = 16,
-        gen_hidden_size : int = 64,
-        val_hidden_size : int = 128,
+        gen_hidden_size : int = 128,
+        val_hidden_size : int = 256,
         kp : float = 0.01,
     ):
         self.action_size = action_size
@@ -138,7 +138,7 @@ class Trainer:
         
         return total_reward
 
-    def train(self, epochs=1000, batch_size=32, val_batch_size=4, value_samples=32):
+    def train(self, epochs=1000, batch_size=64, val_batch_size=100, value_samples=32):
         gen_optim = RMSprop(self.generator.parameters(), lr=0.001)
         val_optim = RMSprop(self.value.parameters(), lr=0.001)
         gen_loss_fn = nn.BCELoss()
@@ -173,7 +173,7 @@ class Trainer:
             actual_rewards = self.vec_test(simulate_agents)
 
             for j in range(value_samples):
-                if(j < 9 * value_samples // 10):
+                if(j < 5 * value_samples // 10):
                     self.dataset_train.append((simulate[j], actual_rewards[j]))
                 else:
                     self.dataset_test.append((simulate[j], actual_rewards[j]))
@@ -208,7 +208,25 @@ class Trainer:
                 val_loss_test = val_loss_fn(output_test.squeeze(), labels_test)
                 print("value test loss: {}".format(val_loss_test))
             """
-            for val_epoch in range(10):
+            for val_epoch in range(100):
+                #j = np.random.triangular(left=0, mode=len(self.dataset_train)-0.001, right=len(self.dataset_train)-0.001)
+                j = np.random.exponential() * value_samples * np.e
+                j = max(0, len(self.dataset_train)-1 - int(j))
+
+                cumul = 0
+                for l in range(val_batch_size):
+                    k = np.random.exponential() * value_samples * np.e
+                    k = max(0, len(self.dataset_train)-1 - int(j))
+                    if(self.dataset_train[j][1] > self.dataset_train[k][1]):
+                        cumul += 1
+
+                prob = cumul / val_batch_size
+                val_optim.zero_grad()
+                output = self.value(torch.tensor(self.dataset_train[j][0]))
+                val_loss = val_loss_fn(output, torch.tensor([prob], dtype=torch.double))
+                val_loss.backward()
+                val_optim.step()
+                """
                 val_optim.zero_grad()
                 samples, rewards = [], []
                 best_reward, best_ind = 0, 0
@@ -235,7 +253,7 @@ class Trainer:
                 val_loss = val_loss_fn(output.squeeze(), labels)
                 print("value loss: {}".format(val_loss))
                 val_loss.backward()
-                val_optim.step()
+                val_optim.step()"""
             
             predicted_value_test = self.value(torch.tensor(np.array(simulate)))
             np.set_printoptions(linewidth=200)
@@ -245,12 +263,13 @@ class Trainer:
             plt.figure()
             plt.scatter(actual_rewards, predicted_value_test.detach().numpy())
             plt.savefig("figs/"  + str(i) + ".png")
+            plt.close()
 
             predicted_value = self.value(generated)
             
-            #gen_loss = gen_loss_fn(predicted_value.squeeze(), torch.ones((batch_size), dtype=torch.double))
-            #gen_loss.backward()
-            #gen_optim.step()
+            gen_loss = gen_loss_fn(predicted_value.squeeze(), torch.ones((batch_size), dtype=torch.double))
+            gen_loss.backward()
+            gen_optim.step()
 
 
 if __name__ == "__main__":
