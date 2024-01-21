@@ -109,6 +109,8 @@ class Trainer:
         self.dataset_train = []
         self.dataset_test = []
 
+
+
     def vec_test(self, agents):
         envs = gym.vector.make("Ant-v4", num_envs=len(agents), reset_noise_scale=0)
 
