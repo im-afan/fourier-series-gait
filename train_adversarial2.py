@@ -41,8 +41,10 @@ class Generator(nn.Module):
 
     def sample_gait(self, mean, dev, n=1):
         sz = 2*self.action_size*self.n_frequencies+1 
-        dist = torch.distributions.MultivariateNormal(torch.zeros((sz)), torch.eye(sz))
-        return dist.sample_n(n) * dev + mean.repeat(n, 1)
+        dist = torch.distributions.MultivariateNormal(torch.ones((sz)) * mean, torch.eye(sz) * dev)
+        sample = dist.sample_n(n)
+        log_prob = dist.log_prob(sample)
+        return sample, log_prob 
 
 
 class Value(nn.Module):
@@ -192,13 +194,13 @@ class Trainer:
             noise = torch.rand((self.gen_noise_size), dtype=torch.double)
 
             means = self.generator(noise)
-            print(means.shape)
+            #print(means.shape)
             value = self.value(means)
-            print(self.normalize_reward(value, inverse=True))
+            #print(self.normalize_reward(value, inverse=True))
             value_detached = value.detach()
             std = 0.1 #todo use a different scheduler
            
-            simulate = self.generator.sample_gait(means, std, n=batch_size) 
+            simulate, log_prob = self.generator.sample_gait(means, std, n=batch_size) 
             simulate_agents = []
             for j in range(batch_size):
                 agent = simulate[j].detach().numpy()
@@ -225,7 +227,7 @@ class Trainer:
                 #advantage_actor = actual_rewards[j] - value_detached
                 #advantage_critic = actual_rewards[j] - value 
                 print("advantage: {} {}".format(advantage_actor, advantage_critic))
-                actor_loss += -advantage_actor
+                actor_loss += -advantage_actor * log_prob[j]
                 critic_loss += advantage_critic.pow(2)
           
             print("actor loss: {}, critic loss: {}, rewards: {}".format(actor_loss, critic_loss, np.mean(actual_rewards)))
