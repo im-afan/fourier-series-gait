@@ -33,7 +33,7 @@ class Generator(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.Mish(),
             nn.Linear(hidden_size, 2*action_size*n_frequencies+1),
-            nn.Tanh(),
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
@@ -47,7 +47,8 @@ class Generator(nn.Module):
         )
         sample = dist.sample_n(n)
         log_prob = dist.log_prob(sample)
-        return sample, log_prob 
+        entropy = dist.entropy()
+        return sample, log_prob, entropy
 
 
 class Value(nn.Module):
@@ -67,6 +68,7 @@ class Value(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.Mish(),
             nn.Linear(hidden_size, 1),
+            nn.Sigmoid()
         )
         print(2*action_size*n_frequencies+1)
 
@@ -84,7 +86,8 @@ class Trainer:
         val_hidden_size : int = 256,
         kp : float = 0.01,
         k_critic: float = 0.1,
-        k_entropy: float = 1.0,
+        k_entropy: float = 0.0000, # should be negative to maximize entropy ???
+        reward_discount: float = 0.99
     ):
         self.action_size = action_size
         self.n_frequencies = n_frequencies
@@ -94,6 +97,7 @@ class Trainer:
         self.kp = kp
         self.k_critic = k_critic
         self.k_entropy = k_entropy
+        self.reward_discount = reward_discount
 
         self.generator = Generator(
             action_size,
@@ -177,24 +181,29 @@ class Trainer:
         return total_reward
 
     def train(self, epochs=1000, batch_size=1, val_batch_size=100, value_samples=32):
-        gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.004)
-        val_optim = torch.optim.Adam(self.value.parameters(), lr=0.004)
+        gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.01)
+        val_optim = torch.optim.Adam(self.value.parameters(), lr=0.01)
 
         torch.autograd.set_detect_anomaly(True)
         noise = torch.rand((self.gen_noise_size), dtype=torch.double)
+
+        sum_reward = 0
+        weights_sum = 0
+
         for i in range(epochs):
             print("epoch %d" % i)
 
             #noise = torch.rand((self.gen_noise_size), dtype=torch.double)
 
-            means = self.generator(noise)
+            generated = self.generator(noise)
+            mean = generated[:]
+            std = generated[-1]
             #print(means.shape)
-            value = self.value(means.detach())
+            value = self.value(generated.detach())
             #print(self.normalize_reward(value, inverse=True))
             value_detached = value.detach()
-            std = 0.1 #todo use a different scheduler
            
-            simulate, log_prob = self.generator.sample_gait(means, std, n=batch_size) 
+            simulate, log_prob, entropy = self.generator.sample_gait(mean, std, n=batch_size) 
             simulate_agents = []
             for j in range(batch_size):
                 agent = simulate[j].detach().numpy()
@@ -204,29 +213,29 @@ class Trainer:
             actual_rewards = self.vec_test(simulate_agents)
             #actual_rewards = np.array([self.test(simulate_agents)])
 
-            binary_rewards = torch.zeros(len(actual_rewards))
-            normalized_rewards = self.normalize_reward(actual_rewards)
-            normalized_rewards_detach = torch.tensor(normalized_rewards).clone().detach()
-            inds = list(range(simulate.shape[0]))
-            inds.sort(key = lambda x: actual_rewards[x], reverse=True)
-            for j in range(len(inds)):
-                ind = inds[j]
-                binary_rewards[ind] = j/len(inds)
+            sum_reward = sum_reward * self.reward_discount + np.mean(actual_rewards)
+            weights_sum = weights_sum * self.reward_discount + 1
 
-            actor_loss = torch.zeros((1))
+            binary_rewards = torch.zeros(len(actual_rewards)).detach()
+            for j in range(len(actual_rewards)):
+                if(actual_rewards[j] >= sum_reward/weights_sum):
+                    binary_rewards[j] = 1 
+
+            actor_loss = torch.ones((1)) * self.k_entropy * entropy
             critic_loss = torch.zeros((1))
             for j in range(simulate.shape[0]):
-                advantage_actor = normalized_rewards_detach[j] - value_detached
-                advantage_critic = normalized_rewards[j] - value
+                advantage_actor = binary_rewards[j] - value_detached
+                advantage_critic = binary_rewards[j] - value
                 #advantage_critic = value
                 #advantage_actor = actual_rewards[j] - value_detached
                 #advantage_critic = actual_rewards[j] - value 
                 print("advantage: {} {}".format(advantage_actor, advantage_critic))
                 print(log_prob[j])
-                actor_loss += -advantage_actor * log_prob[j]
+                actor_loss += advantage_actor * log_prob[j]
                 critic_loss += advantage_critic.pow(2)
                 #critic_loss += nn.MSELoss()(value, torch.tensor([normalized_rewards[j]]))
-          
+            #print("value: {}".format(self.normalize_reward(value, inverse=True))) 
+            print("entropy: {}, std: {}".format(entropy, std))
             print("actor loss: {}, critic loss: {}, rewards: {}".format(actor_loss, critic_loss, np.mean(actual_rewards)))
             #loss = actor_loss + self.k_critic * critic_loss 
             gen_optim.zero_grad()
