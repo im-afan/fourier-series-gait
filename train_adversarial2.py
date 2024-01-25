@@ -41,7 +41,10 @@ class Generator(nn.Module):
 
     def sample_gait(self, mean, dev, n=1):
         sz = 2*self.action_size*self.n_frequencies+1 
-        dist = torch.distributions.MultivariateNormal(torch.ones((sz)) * mean, torch.eye(sz) * dev)
+        dist = torch.distributions.MultivariateNormal(
+          torch.ones((sz), dtype=torch.double) * mean,
+          torch.eye(sz, dtype=torch.double) * dev
+        )
         sample = dist.sample_n(n)
         log_prob = dist.log_prob(sample)
         return sample, log_prob 
@@ -173,29 +176,20 @@ class Trainer:
         
         return total_reward
 
-    def train(self, epochs=1000, batch_size=16, val_batch_size=100, value_samples=32):
+    def train(self, epochs=1000, batch_size=1, val_batch_size=100, value_samples=32):
         gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.004)
         val_optim = torch.optim.Adam(self.value.parameters(), lr=0.004)
-        """actor_optim = torch.optim.Adam([
-            {"params": self.model.latent.parameters(), "lr": 0.002},
-            {"params": self.model.actor.parameters()},
-        ], lr=0.004)
-        critic_optim = torch.optim.Adam([
-            {"params": self.model.latent.parameters(), "lr": 0.002},
-            {"params": self.model.critic.parameters()},
-        ], lr=0.004)"""
-        #gen_loss_fn = nn.BCELoss()
-        #val_loss_fn = nn.BCELoss()
+
         torch.autograd.set_detect_anomaly(True)
+        noise = torch.rand((self.gen_noise_size), dtype=torch.double)
         for i in range(epochs):
             print("epoch %d" % i)
 
             #noise = torch.rand((self.gen_noise_size), dtype=torch.double)
-            noise = torch.rand((self.gen_noise_size), dtype=torch.double)
 
             means = self.generator(noise)
             #print(means.shape)
-            value = self.value(means)
+            value = self.value(means.detach())
             #print(self.normalize_reward(value, inverse=True))
             value_detached = value.detach()
             std = 0.1 #todo use a different scheduler
@@ -212,7 +206,7 @@ class Trainer:
 
             binary_rewards = torch.zeros(len(actual_rewards))
             normalized_rewards = self.normalize_reward(actual_rewards)
-            #normalized_rewards_detach = normalized_rewards.detach()
+            normalized_rewards_detach = torch.tensor(normalized_rewards).clone().detach()
             inds = list(range(simulate.shape[0]))
             inds.sort(key = lambda x: actual_rewards[x], reverse=True)
             for j in range(len(inds)):
@@ -222,18 +216,21 @@ class Trainer:
             actor_loss = torch.zeros((1))
             critic_loss = torch.zeros((1))
             for j in range(simulate.shape[0]):
-                advantage_actor = normalized_rewards[j] - value.detach()
+                advantage_actor = normalized_rewards_detach[j] - value_detached
                 advantage_critic = normalized_rewards[j] - value
+                #advantage_critic = value
                 #advantage_actor = actual_rewards[j] - value_detached
                 #advantage_critic = actual_rewards[j] - value 
                 print("advantage: {} {}".format(advantage_actor, advantage_critic))
+                print(log_prob[j])
                 actor_loss += -advantage_actor * log_prob[j]
                 critic_loss += advantage_critic.pow(2)
+                #critic_loss += nn.MSELoss()(value, torch.tensor([normalized_rewards[j]]))
           
             print("actor loss: {}, critic loss: {}, rewards: {}".format(actor_loss, critic_loss, np.mean(actual_rewards)))
             #loss = actor_loss + self.k_critic * critic_loss 
             gen_optim.zero_grad()
-            actor_loss.backward()
+            actor_loss.backward(retain_graph=True)
             gen_optim.step()
             
             val_optim.zero_grad()
