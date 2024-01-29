@@ -86,8 +86,8 @@ class Trainer:
         val_hidden_size : int = 256,
         kp : float = 0.01,
         k_critic: float = 0.1,
-        k_entropy: float = 0.0000, # should be negative to maximize entropy ???
-        reward_discount: float = 0.99
+        k_entropy: float = -0.04, # should be negative to maximize entropy ???
+        reward_discount: float = 0.5
     ):
         self.action_size = action_size
         self.n_frequencies = n_frequencies
@@ -121,17 +121,23 @@ class Trainer:
         return (x-900) / 200
 
     def test(self, agents):
-        env = gym.make("Ant-v4", render_mode="human", reset_noise_scale=0)
+        env = gym.make("Hopper-v4", render_mode="human", reset_noise_scale=0)
 
         t = 0
         total_reward = 0 
         obs, _ = env.reset()
 
         for i in range(1000):
+            # FOR ANT
             # from documentation: action = hip_4, angle_4, hip_1, angle_1, hip_2, angle_2, hip_3, angle_3
             # observation: hip_4=11, ankle_4=12, hip_1=5, ankle_1=6, hip_2=7, ankle_2=8 hip_3=9, ankle_3=10
-            joint_state = np.array([obs[11], obs[12], obs[5], obs[6], obs[7], obs[8], obs[9], obs[10]]) 
+            #joint_state = np.array([obs[11], obs[12], obs[5], obs[6], obs[7], obs[8], obs[9], obs[10]]) 
             #joint_state = joint_state.T #magic!
+
+            # FOR HOPPER
+            # from documentation: action: thigh_joint, leg_joint, foot_joint
+            # observation: thigh_joint=2, leg_joint=3, foot_joint=4
+            joint_state = np.array([obs[2], obs[3], obs[4]])
 
             wanted_state = agents[0].sample(i, deriv=False, norm=False) * 5
             print(i, wanted_state)
@@ -152,17 +158,25 @@ class Trainer:
 
 
     def vec_test(self, agents):
-        envs = gym.vector.make("Ant-v4", num_envs=len(agents), reset_noise_scale=0)
+        envs = gym.vector.make("Hopper-v4", num_envs=len(agents), reset_noise_scale=0)
 
         t = 0
         total_reward = np.zeros((len(agents)))
         obs, _ = envs.reset()
 
         for i in range(1000):
+            # FOR ANT
             # from documentation: action = hip_4, angle_4, hip_1, angle_1, hip_2, angle_2, hip_3, angle_3
             # observation: hip_4=11, ankle_4=12, hip_1=5, ankle_1=6, hip_2=7, ankle_2=8 hip_3=9, ankle_3=10
-            joint_state = np.array([obs[:, 11], obs[:, 12], obs[:, 5], obs[:, 6], obs[:, 7], obs[:, 8], obs[:, 9], obs[:, 10]]) 
-            joint_state = joint_state.T #magic!
+            # joint_state = np.array([obs[:, 11], obs[:, 12], obs[:, 5], obs[:, 6], obs[:, 7], obs[:, 8], obs[:, 9], obs[:, 10]]) 
+            # joint_state = joint_state.T #magic!
+
+            # FOR HOPPER
+            # from documentation: action: thigh_joint, leg_joint, foot_joint
+            # observation: thigh_joint=2, leg_joint=3, foot_joint=4
+            joint_state = np.array([obs[:, 2], obs[:, 3], obs[:, 4]])
+            joint_state = joint_state.T
+
 
             wanted_state = np.array([agents[j].sample(i, deriv=False, norm=False) for j in range(len(agents))]) * 5
         
@@ -180,7 +194,7 @@ class Trainer:
         
         return total_reward
 
-    def train(self, epochs=1000, batch_size=1, val_batch_size=100, value_samples=32):
+    def train(self, epochs=1000, batch_size=32, val_batch_size=100, value_samples=32):
         gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.01)
         val_optim = torch.optim.Adam(self.value.parameters(), lr=0.01)
 
@@ -223,6 +237,7 @@ class Trainer:
 
             actor_loss = torch.ones((1)) * self.k_entropy * entropy
             critic_loss = torch.zeros((1))
+            print("predicted value: {}".format(value))
             for j in range(simulate.shape[0]):
                 advantage_actor = binary_rewards[j] - value_detached
                 advantage_critic = binary_rewards[j] - value
@@ -231,12 +246,13 @@ class Trainer:
                 #advantage_critic = actual_rewards[j] - value 
                 print("advantage: {} {}".format(advantage_actor, advantage_critic))
                 print(log_prob[j])
-                actor_loss += advantage_actor * log_prob[j]
+                actor_loss += -advantage_actor * log_prob[j]
                 critic_loss += advantage_critic.pow(2)
                 #critic_loss += nn.MSELoss()(value, torch.tensor([normalized_rewards[j]]))
             #print("value: {}".format(self.normalize_reward(value, inverse=True))) 
             print("entropy: {}, std: {}".format(entropy, std))
             print("actor loss: {}, critic loss: {}, rewards: {}".format(actor_loss, critic_loss, np.mean(actual_rewards)))
+            print("avg reward (discounted): {}".format(sum_reward/weights_sum))
             #loss = actor_loss + self.k_critic * critic_loss 
             gen_optim.zero_grad()
             actor_loss.backward(retain_graph=True)
@@ -247,7 +263,7 @@ class Trainer:
             val_optim.step()
 
 if __name__ == "__main__":
-    env = gym.make("Ant-v4", reset_noise_scale=0, render_mode="human")
+    env = gym.make("Hopper-v4", reset_noise_scale=0, render_mode="human")
     action_size = env.action_space.shape[0]
     trainer = Trainer(action_size=action_size)
     trainer.train()
