@@ -86,7 +86,7 @@ class Trainer:
         val_hidden_size : int = 256,
         kp : float = 0.01,
         k_critic: float = 0.1,
-        k_entropy: float = -0.04, # should be negative to maximize entropy ???
+        k_entropy: float = -0.06, # should be negative to maximize entropy ???
         reward_discount: float = 0.5
     ):
         self.action_size = action_size
@@ -216,6 +216,8 @@ class Trainer:
             value = self.value(generated.detach())
             #print(self.normalize_reward(value, inverse=True))
             value_detached = value.detach()
+
+            np.save("saved_agents/" + str(i) + ".npy", mean.detach().numpy())
            
             simulate, log_prob, entropy = self.generator.sample_gait(mean, std, n=batch_size) 
             simulate_agents = []
