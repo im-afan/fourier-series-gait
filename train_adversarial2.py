@@ -199,7 +199,7 @@ class Trainer:
         val_optim = torch.optim.Adam(self.value.parameters(), lr=0.01)
 
         torch.autograd.set_detect_anomaly(True)
-        noise = torch.rand((self.gen_noise_size), dtype=torch.double)
+        #noise = torch.rand((self.gen_noise_size), dtype=torch.double)
 
         sum_reward = 0
         weights_sum = 0
@@ -207,7 +207,7 @@ class Trainer:
         for i in range(epochs):
             print("epoch %d" % i)
 
-            #noise = torch.rand((self.gen_noise_size), dtype=torch.double)
+            noise = torch.rand((self.gen_noise_size), dtype=torch.double)
 
             generated = self.generator(noise)
             mean = generated[:]
@@ -217,7 +217,7 @@ class Trainer:
             #print(self.normalize_reward(value, inverse=True))
             value_detached = value.detach()
 
-            np.save("saved_agents/" + str(i) + ".npy", mean.detach().numpy())
+            np.savetxt("saved_agents/" + str(i) + ".npy", mean.detach().numpy())
            
             simulate, log_prob, entropy = self.generator.sample_gait(mean, std, n=batch_size) 
             simulate_agents = []
