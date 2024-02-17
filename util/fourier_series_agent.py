@@ -25,6 +25,7 @@ class FourierSeriesAgent():
             self.max_vals[i] = np.sqrt(self.max_vals[i])
         #print(self.max_vals)
 
+    
     def sample(self, t: float, deriv: bool = True, norm: bool = True) -> np.ndarray:
         res = np.zeros((self.joints))
         for j in range(self.n):
@@ -65,4 +66,9 @@ class FourierSeriesAgent():
     def load(self, coef_checkpoint="saved_agents/best_agent_coef.npy", L_checkpoint="saved_agents/best_agent_L.npy"):
         self.coefs = np.load(coef_checkpoint)
         self.L = np.load(L_checkpoint)
+
+def from_array(joints: int, n: int, a: np.ndarray, kp: float=0.01):
+    coefs = np.array(a[:-1]).reshape((joints, n, 2))
+    L = a[-1]
+    return FourierSeriesAgents(coefs, L=L, kp=kp)
 

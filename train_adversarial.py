@@ -13,88 +13,81 @@ from torch.optim import Adam, RMSprop
 import matplotlib.pyplot as plt
 #from torch.utils.tensorboard import SummaryWriter
 
-class Value(nn.Module):
-    def __init__(
-        self, 
-        action_size : int, 
-        n_frequencies : int, 
-        hidden_size: int = 64
-    ):
-        super().__init__()
-        self.dense1 = nn.Linear(action_size*n_frequencies*2 + 1, hidden_size)
-        self.dense2 = nn.Linear(hidden_size, hidden_size)
-        self.dense3 = nn.Linear(hidden_size, hidden_size)
-        self.dense4 = nn.Linear(hidden_size, 1)
-        self.seq = nn.Sequential(
-            self.dense1,
-            #nn.BatchNorm1d(hidden_size),
-            #nn.Dropout(),
-            nn.Mish(),
-            self.dense2,
-            #nn.BatchNorm1d(hidden_size),
-            #nn.Dropout(),
-            nn.Mish(),
-            self.dense3,
-            #nn.BatchNorm1d(hidden_size),
-            #nn.Dropout(),
-            nn.Mish(),
-            self.dense4,
-            #nn.BatchNorm1d(1),
-            nn.Sigmoid(),
-        )
-        self.double()
-
-    def forward(self, *args):
-        if(len(args) == 1):
-            x = args[0]
-            return self.seq(x) 
-
-        coefs, L = args[0], args[1]
-        x = torch.tensor(coefs.flatten())
-        x = torch.cat([x, torch.tensor([L])])
-        return self.seq(x)
-        
 class Generator(nn.Module):
     def __init__(
-        self, 
-        action_size : int, 
-        n_frequencies : int, 
-        hidden_size: int = 64,
-        noise_size: int = 16
+        self,
+        action_size: int,
+        n_frequencies: int,
+        noise_size: int = 16,
+        hidden_size: int = 64
     ):
-        super().__init__()
-        self.dense1 = nn.Linear(noise_size, hidden_size)
-        self.dense2 = nn.Linear(hidden_size, hidden_size)
-        self.dense3 = nn.Linear(hidden_size, hidden_size)
-        self.dense4 = nn.Linear(hidden_size, action_size*n_frequencies*2 + 1)
-        self.seq = nn.Sequential(
-            self.dense1,
-            nn.BatchNorm1d(hidden_size),
+        self.action_size = action_size
+        self.n_frequencies = n_frequencies
+
+        super().__init__();
+        self.actor = nn.Sequential(
+            nn.Linear(noise_size, hidden_size),
             nn.Mish(),
-            self.dense2,
-            nn.BatchNorm1d(hidden_size),
+            nn.Linear(hidden_size, hidden_size),
             nn.Mish(),
-            self.dense3,
-            nn.BatchNorm1d(hidden_size),
+            nn.Linear(hidden_size, hidden_size),
             nn.Mish(),
-            self.dense4,
-            nn.BatchNorm1d(action_size*n_frequencies*2+1),
-            #nn.Sigmoid(),
+            nn.Linear(hidden_size, 2*action_size*n_frequencies+1),
+            nn.Sigmoid(),
         )
-        self.double()
 
     def forward(self, x):
-        return self.seq(x) 
+        return self.actor(x)
+
+    def sample_gait(self, mean, dev, n=1):
+        sz = 2*self.action_size*self.n_frequencies+1 
+        dist = torch.distributions.MultivariateNormal(
+          torch.ones((sz), dtype=torch.double) * mean,
+          torch.eye(sz, dtype=torch.double) * dev
+        )
+        sample = dist.sample_n(n)
+        log_prob = dist.log_prob(sample)
+        entropy = dist.entropy()
+        return sample, log_prob, entropy
+
+
+class Value(nn.Module):
+    def __init__(
+        self,
+        action_size: int,
+        n_frequencies: int,
+        noise_size: int = 16,
+        hidden_size: int = 64
+    ):
+        super().__init__();
+        self.actor = nn.Sequential(
+            nn.Linear(2*action_size*n_frequencies+1, hidden_size),
+            nn.Mish(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Mish(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Mish(),
+            nn.Linear(hidden_size, 1),
+            nn.Sigmoid()
+        )
+        print(2*action_size*n_frequencies+1)
+
+    def forward(self, x):
+        print(x.shape)
+        return self.actor(x)
 
 class Trainer:
     def __init__(
         self,
         action_size : int,
-        n_frequencies : int = 5, 
+        n_frequencies : int = 2, 
         gen_noise_size : int = 16,
         gen_hidden_size : int = 128,
         val_hidden_size : int = 256,
         kp : float = 0.01,
+        k_critic: float = 0.1,
+        k_entropy: float = 0.05, # should be negative to maximize entropy ???
+        reward_discount: float = 0.5
     ):
         self.action_size = action_size
         self.n_frequencies = n_frequencies
@@ -102,29 +95,90 @@ class Trainer:
         self.gen_hidden_size = gen_hidden_size
         self.val_hidden_size = val_hidden_size
         self.kp = kp
+        self.k_critic = k_critic
+        self.k_entropy = k_entropy
+        self.reward_discount = reward_discount
 
-        self.generator = Generator(action_size, n_frequencies, gen_hidden_size, gen_noise_size)
-        self.value = Value(action_size, n_frequencies, val_hidden_size)
+        self.generator = Generator(
+            action_size,
+            n_frequencies,
+            gen_noise_size,
+            gen_hidden_size
+        )
+        self.generator.double()
+
+        self.value = Value(
+            action_size,
+            n_frequencies,
+            gen_noise_size,
+            gen_hidden_size
+        )
+        self.value.double()
+       
+    def normalize_reward(self, x, inverse=False):
+        if(inverse):
+            return x * 200 + 900
+        return (x-900) / 200
+
+    def test(self, agents):
+        env = gym.make("Hopper-v4", render_mode="human", reset_noise_scale=0)
+
+        t = 0
+        total_reward = 0 
+        obs, _ = env.reset()
+
+        for i in range(1000):
+            # FOR ANT
+            # from documentation: action = hip_4, angle_4, hip_1, angle_1, hip_2, angle_2, hip_3, angle_3
+            # observation: hip_4=11, ankle_4=12, hip_1=5, ankle_1=6, hip_2=7, ankle_2=8 hip_3=9, ankle_3=10
+            #joint_state = np.array([obs[11], obs[12], obs[5], obs[6], obs[7], obs[8], obs[9], obs[10]]) 
+            #joint_state = joint_state.T #magic!
+
+            # FOR HOPPER
+            # from documentation: action: thigh_joint, leg_joint, foot_joint
+            # observation: thigh_joint=2, leg_joint=3, foot_joint=4
+            joint_state = np.array([obs[2], obs[3], obs[4]])
+
+            wanted_state = agents[0].sample(i, deriv=False, norm=False) * 5
+            print(i, wanted_state)
         
-        self.dataset_train = []
-        self.dataset_test = []
+            action = self.kp * (wanted_state-joint_state)
+            obs, reward, _, _, _ = env.step(action)
+            total_reward += reward
+            t += 1
 
+            """ logging for tests
+            states.append(joint_state)
+            wanted_states.append(wanted_state)
+            times.append(i)
+            actions.append(action)
+            """
+        
+        return total_reward
 
 
     def vec_test(self, agents):
-        envs = gym.vector.make("Ant-v4", num_envs=len(agents), reset_noise_scale=0)
+        envs = gym.vector.make("Hopper-v4", num_envs=len(agents), reset_noise_scale=0)
 
         t = 0
         total_reward = np.zeros((len(agents)))
         obs, _ = envs.reset()
 
         for i in range(1000):
+            # FOR ANT
             # from documentation: action = hip_4, angle_4, hip_1, angle_1, hip_2, angle_2, hip_3, angle_3
             # observation: hip_4=11, ankle_4=12, hip_1=5, ankle_1=6, hip_2=7, ankle_2=8 hip_3=9, ankle_3=10
-            joint_state = np.array([obs[:, 11], obs[:, 12], obs[:, 5], obs[:, 6], obs[:, 7], obs[:, 8], obs[:, 9], obs[:, 10]]) 
-            joint_state = joint_state.T #magic!
+            # joint_state = np.array([obs[:, 11], obs[:, 12], obs[:, 5], obs[:, 6], obs[:, 7], obs[:, 8], obs[:, 9], obs[:, 10]]) 
+            # joint_state = joint_state.T #magic!
 
-            wanted_state = np.array([agents[j].sample(i, deriv=False, norm=False) for j in range(len(agents))])
+            # FOR HOPPER
+            # from documentation: action: thigh_joint, leg_joint, foot_joint
+            # observation: thigh_joint=2, leg_joint=3, foot_joint=4
+            joint_state = np.array([obs[:, 2], obs[:, 3], obs[:, 4]])
+            joint_state = joint_state.T
+
+
+            wanted_state = np.array([agents[j].sample(i, deriv=False, norm=False) for j in range(len(agents))]) * 5
         
             action = self.kp * (wanted_state-joint_state)
             obs, reward, _, _, _ = envs.step(action)
@@ -140,142 +194,78 @@ class Trainer:
         
         return total_reward
 
-    def train(self, epochs=1000, batch_size=64, val_batch_size=100, value_samples=32):
-        gen_optim = RMSprop(self.generator.parameters(), lr=0.001)
-        val_optim = RMSprop(self.value.parameters(), lr=0.001)
-        gen_loss_fn = nn.BCELoss()
-        val_loss_fn = nn.BCELoss()
-        #noise = torch.rand((batch_size, self.gen_noise_size), dtype=torch.double)
+    def train(self, epochs=1000, batch_size=32, val_batch_size=100, value_samples=32):
+        gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.01)
+        val_optim = torch.optim.Adam(self.value.parameters(), lr=0.01)
+
+        torch.autograd.set_detect_anomaly(True)
+        #noise = torch.rand((self.gen_noise_size), dtype=torch.double)
+
+        sum_reward = 0
+        weights_sum = 0
+
         for i in range(epochs):
             print("epoch %d" % i)
-            #gen_optim.zero_grad()
 
-            noise = torch.rand((batch_size, self.gen_noise_size), dtype=torch.double)
+            noise = torch.rand((self.gen_noise_size), dtype=torch.double)
+
             generated = self.generator(noise)
-            
-            """
-            for j in range(value_samples):
-                sample = generated[i].detach().numpy()
-                L = sample[-1]
-                coefs = sample[:-1].reshape((self.n_frequencies, 2))
+            mean = generated[:]
+            std = generated[-1]
+            #print(means.shape)
+            value = self.value(generated.detach())
+            #print(self.normalize_reward(value, inverse=True))
+            value_detached = value.detach()
 
-                agent = FourierSeriesAgent(coefs, L)
-                reward = agent.test(gym.make("Ant-v4"))
-                self.dataset.append((sample, self.normalize_reward(reward)))
-            """
-            generated_dataset = generated.detach().numpy()
-            simulate = generated_dataset[:value_samples]
-            simulate_agents = []
-            for j in range(value_samples):
-                coefs = simulate[j][:-1].reshape((self.action_size, self.n_frequencies, 2))
-                L = simulate[j][-1]
-                simulate_agents.append(FourierSeriesAgent(coefs=coefs, L=L))
-
-            #if(i == 0): #debug
-            actual_rewards = self.vec_test(simulate_agents)
-
-            for j in range(value_samples):
-                if(j < 5 * value_samples // 10):
-                    self.dataset_train.append((simulate[j], actual_rewards[j]))
-                else:
-                    self.dataset_test.append((simulate[j], actual_rewards[j]))
-
-            """
-            for l in range(3):
-                val_optim.zero_grad()
-                logits, labels = [], []
-                logits_test, labels_test = [], []
-                for j in range(batch_size):
-                    if(j < 12):
-                        k = len(self.dataset_train)-j-1
-                    else:
-                        k = np.random.randint(len(self.dataset_train))
-                    logits.append(self.dataset_train[k][0])
-                    labels.append(self.dataset_train[k][1])
-                    k = np.random.randint(len(self.dataset_test))
-                    logits_test.append(self.dataset_test[k][0])
-                    labels_test.append(self.dataset_test[k][1])
-                logits = torch.tensor(np.array(logits))
-                labels = torch.tensor(np.array(labels))
-                logits_test = torch.tensor(np.array(logits_test))
-                labels_test = torch.tensor(np.array(labels_test))
-
-                output = self.value(logits)
-                val_loss = val_loss_fn(output.squeeze(), labels)
-                print("value train loss: {}".format(val_loss))
-                val_loss.backward()
-                val_optim.step()
+            np.savetxt("saved_agents/" + str(i) + ".npy", mean.detach().numpy())
            
-                output_test = self.value(logits_test)
-                val_loss_test = val_loss_fn(output_test.squeeze(), labels_test)
-                print("value test loss: {}".format(val_loss_test))
-            """
-            for val_epoch in range(100):
-                #j = np.random.triangular(left=0, mode=len(self.dataset_train)-0.001, right=len(self.dataset_train)-0.001)
-                j = np.random.exponential() * value_samples * np.e
-                j = max(0, len(self.dataset_train)-1 - int(j))
+            simulate, log_prob, entropy = self.generator.sample_gait(mean, std, n=batch_size) 
+            simulate_agents = []
+            for j in range(batch_size):
+                agent = simulate[j].detach().numpy()
+                coefs = agent[:-1].reshape((self.action_size, self.n_frequencies, 2))
+                L = agent[-1]
+                simulate_agents.append(FourierSeriesAgent(coefs=coefs, L=10))
+            actual_rewards = self.vec_test(simulate_agents)
+            #actual_rewards = np.array([self.test(simulate_agents)])
 
-                cumul = 0
-                for l in range(val_batch_size):
-                    k = np.random.exponential() * value_samples * np.e
-                    k = max(0, len(self.dataset_train)-1 - int(j))
-                    if(self.dataset_train[j][1] > self.dataset_train[k][1]):
-                        cumul += 1
+            sum_reward = sum_reward * self.reward_discount + np.mean(actual_rewards)
+            weights_sum = weights_sum * self.reward_discount + 1
 
-                prob = cumul / val_batch_size
-                val_optim.zero_grad()
-                output = self.value(torch.tensor(self.dataset_train[j][0]))
-                val_loss = val_loss_fn(output, torch.tensor([prob], dtype=torch.double))
-                val_loss.backward()
-                val_optim.step()
-                """
-                val_optim.zero_grad()
-                samples, rewards = [], []
-                best_reward, best_ind = 0, 0
-                for j in range(val_batch_size): # todo: use a different hyperparameter (this one  is the same number as # of generated samples per generation)
-                    #if(j < 9 * value_samples // 10):
-                    if(False):
-                        k = len(self.dataset_train)-j-1
-                    else:
-                        k = np.random.randint(len(self.dataset_train))
-                    samples.append(self.dataset_train[k][0])
-                    rewards.append(self.dataset_train[k][1])
-                    if(rewards[j] > best_reward):
-                        best_reward = rewards[j]
-                        best_ind = j
-                #r = list(range(len(samples)))
-                #r.sort(key = lambda x: rewards[x])
-                #logits = [samples[i] for i in r]
-                #logits = torch.tensor(np.array(logits))
-                logits = torch.tensor(np.array(samples))
-                labels = torch.zeros((val_batch_size), dtype=torch.double)
-                labels[best_ind] = 1
-                #labels = torch.cat((torch.ones(batch_size//4, dtype=torch.double), torch.zeros(batch_size - batch_size//4, dtype=torch.double)))
-                output = self.value(logits)
-                val_loss = val_loss_fn(output.squeeze(), labels)
-                print("value loss: {}".format(val_loss))
-                val_loss.backward()
-                val_optim.step()"""
-            
-            predicted_value_test = self.value(torch.tensor(np.array(simulate)))
-            np.set_printoptions(linewidth=200)
-            print(actual_rewards)
-            print(predicted_value_test.detach().numpy().squeeze())
-          
-            plt.figure()
-            plt.scatter(actual_rewards, predicted_value_test.detach().numpy())
-            plt.savefig("figs/"  + str(i) + ".png")
-            plt.close()
+            binary_rewards = torch.zeros(len(actual_rewards)).detach()
+            for j in range(len(actual_rewards)):
+                if(actual_rewards[j] >= sum_reward/weights_sum):
+                    binary_rewards[j] = 1 
 
-            predicted_value = self.value(generated)
-            
-            gen_loss = gen_loss_fn(predicted_value.squeeze(), torch.ones((batch_size), dtype=torch.double))
-            gen_loss.backward()
+            actor_loss = torch.ones((1)) * self.k_entropy * entropy
+            critic_loss = torch.zeros((1))
+            print("predicted value: {}".format(value))
+            for j in range(simulate.shape[0]):
+                advantage_actor = binary_rewards[j] - value_detached
+                advantage_critic = binary_rewards[j] - value
+                #advantage_critic = value
+                #advantage_actor = actual_rewards[j] - value_detached
+                #advantage_critic = actual_rewards[j] - value 
+                print("advantage: {} {}".format(advantage_actor, advantage_critic))
+                print(log_prob[j])
+                actor_loss += -advantage_actor * log_prob[j]
+                critic_loss += advantage_critic.pow(2)
+                #critic_loss += nn.MSELoss()(value, torch.tensor([normalized_rewards[j]]))
+            #print("value: {}".format(self.normalize_reward(value, inverse=True))) 
+            print("entropy: {}, std: {}".format(entropy, std))
+            print("actor loss: {}, critic loss: {}, rewards: {}".format(actor_loss, critic_loss, np.mean(actual_rewards)))
+            print("avg reward (discounted): {}".format(sum_reward/weights_sum))
+            #loss = actor_loss + self.k_critic * critic_loss 
+            gen_optim.zero_grad()
+            actor_loss.backward(retain_graph=True)
             gen_optim.step()
-
+            
+            #val_optim.zero_grad()
+            #critic_loss.backward()
+            #val_optim.step()
 
 if __name__ == "__main__":
-    env = gym.make("Ant-v4")
+    env = gym.make("Hopper-v4", reset_noise_scale=0, render_mode="human")
     action_size = env.action_space.shape[0]
     trainer = Trainer(action_size=action_size)
     trainer.train()
