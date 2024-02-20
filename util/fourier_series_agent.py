@@ -70,5 +70,5 @@ class FourierSeriesAgent():
 def from_array(joints: int, n: int, a: np.ndarray, kp: float=0.01):
     coefs = np.array(a[:-1]).reshape((joints, n, 2))
     L = a[-1]
-    return FourierSeriesAgents(coefs, L=L, kp=kp)
+    return FourierSeriesAgent(coefs, L=L, kp=kp)
 

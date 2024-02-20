@@ -1,5 +1,6 @@
 import multiprocessing
 from util.fourier_series_agent import FourierSeriesAgent
+from util.fourier_series_agent import from_array
 import numpy as np
 import gymnasium as gym
 import pybullet_envs_gymnasium
@@ -11,6 +12,7 @@ import torch
 from torch import nn
 from torch.optim import Adam, RMSprop
 import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
 #from torch.utils.tensorboard import SummaryWriter
 
 class Generator(nn.Module):
@@ -32,18 +34,24 @@ class Generator(nn.Module):
             nn.Mish(),
             nn.Linear(hidden_size, hidden_size),
             nn.Mish(),
-            nn.Linear(hidden_size, 2*action_size*n_frequencies+1),
-            nn.Sigmoid(),
+            nn.Linear(hidden_size, 2*(2*action_size*n_frequencies+1)),
+            #nn.Sigmoid(),
         )
 
+        logstd_param = nn.Parameter(torch.ones(2*action_size*n_frequencies+1)*0.1)
+        self.register_parameter("logstd", logstd_param)
+        #print(self.logstd)
+
     def forward(self, x):
-        return self.actor(x)
+        u = self.actor(x)
+        return torch.cat((u[:u.shape[0]//2], self.logstd))
+        #return u
 
     def sample_gait(self, mean, dev, n=1):
         sz = 2*self.action_size*self.n_frequencies+1 
         dist = torch.distributions.MultivariateNormal(
           torch.ones((sz), dtype=torch.double) * mean,
-          torch.eye(sz, dtype=torch.double) * dev
+          torch.diag(dev).to(torch.double)
         )
         sample = dist.sample_n(n)
         log_prob = dist.log_prob(sample)
@@ -80,15 +88,16 @@ class Trainer:
     def __init__(
         self,
         action_size : int,
-        n_frequencies : int = 2, 
-        gen_noise_size : int = 16,
+        n_frequencies : int = 3, 
+        gen_noise_size : int = 2,
         gen_hidden_size : int = 128,
         val_hidden_size : int = 256,
         kp : float = 0.01,
         k_critic: float = 0.1,
-        k_entropy: float = 0.05, # should be negative to maximize entropy ???
-        reward_discount: float = 0.5
+        k_entropy: float = 0.003, # should be negative to maximize entropy ???
+        reward_discount: float = 0.2
     ):
+        #print("aciton size: ", action_size)
         self.action_size = action_size
         self.n_frequencies = n_frequencies
         self.gen_noise_size = gen_noise_size
@@ -114,6 +123,8 @@ class Trainer:
             gen_hidden_size
         )
         self.value.double()
+
+        self.writer = SummaryWriter(log_dir="tensorboard/")
        
     def normalize_reward(self, x, inverse=False):
         if(inverse):
@@ -140,7 +151,6 @@ class Trainer:
             joint_state = np.array([obs[2], obs[3], obs[4]])
 
             wanted_state = agents[0].sample(i, deriv=False, norm=False) * 5
-            print(i, wanted_state)
         
             action = self.kp * (wanted_state-joint_state)
             obs, reward, _, _, _ = env.step(action)
@@ -177,7 +187,6 @@ class Trainer:
             joint_state = np.array([obs[:, 2], obs[:, 3], obs[:, 4]])
             joint_state = joint_state.T
 
-
             wanted_state = np.array([agents[j].sample(i, deriv=False, norm=False) for j in range(len(agents))]) * 5
         
             action = self.kp * (wanted_state-joint_state)
@@ -195,7 +204,7 @@ class Trainer:
         return total_reward
 
     def train(self, epochs=1000, batch_size=32, val_batch_size=100, value_samples=32):
-        gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.01)
+        gen_optim = torch.optim.RMSprop(self.generator.parameters(), lr=0.003)
         val_optim = torch.optim.Adam(self.value.parameters(), lr=0.01)
 
         torch.autograd.set_detect_anomaly(True)
@@ -207,58 +216,67 @@ class Trainer:
         for i in range(epochs):
             print("epoch %d" % i)
 
-            noise = torch.rand((self.gen_noise_size), dtype=torch.double)
+            #noise = torch.normal(mean=torch.zeros((self.gen_noise_size)), std=torch.ones((self.gen_noise_size)))
+            noise = torch.rand((self.gen_noise_size))
+            noise = torch.tensor(noise, dtype=torch.double)
 
             generated = self.generator(noise)
-            mean = generated[:]
-            std = generated[-1]
+            sz = generated.shape[0]
+            mean = generated[:sz//2]
+            log_std = generated[sz//2:]
+            #print(log_std)
             #print(means.shape)
-            value = self.value(generated.detach())
+            #value = self.value(generated.detach())
             #print(self.normalize_reward(value, inverse=True))
-            value_detached = value.detach()
+            #value_detached = value.detach()
 
             np.savetxt("saved_agents/" + str(i) + ".npy", mean.detach().numpy())
            
-            simulate, log_prob, entropy = self.generator.sample_gait(mean, std, n=batch_size) 
+            simulate, log_prob, entropy = self.generator.sample_gait(mean, torch.exp(log_std), n=batch_size) 
             simulate_agents = []
             for j in range(batch_size):
-                agent = simulate[j].detach().numpy()
-                coefs = agent[:-1].reshape((self.action_size, self.n_frequencies, 2))
-                L = agent[-1]
-                simulate_agents.append(FourierSeriesAgent(coefs=coefs, L=10))
+                #agent = simulate[j].detach().numpy()
+                #coefs = agent[:-1].reshape((self.action_size, self.n_frequencies, 2))
+                #L = agent[-1]
+                #simulate_agents.append(FourierSeriesAgent(coefs=coefs, L=10))
+                simulate_agents.append(from_array(self.action_size, self.n_frequencies, simulate[j].detach().numpy()))
             actual_rewards = self.vec_test(simulate_agents)
             #actual_rewards = np.array([self.test(simulate_agents)])
-
-            sum_reward = sum_reward * self.reward_discount + np.mean(actual_rewards)
-            weights_sum = weights_sum * self.reward_discount + 1
-
-            binary_rewards = torch.zeros(len(actual_rewards)).detach()
+ 
+            binary_rewards = -torch.ones(len(actual_rewards)).detach()
             for j in range(len(actual_rewards)):
-                if(actual_rewards[j] >= sum_reward/weights_sum):
+                if(weights_sum == 0):
+                    binary_rewards[j] = 1
+                elif(actual_rewards[j] >= sum_reward/weights_sum):
                     binary_rewards[j] = 1 
 
             actor_loss = torch.ones((1)) * self.k_entropy * entropy
+            #actor_loss = torch.ones((1)) * self.k_entropy * (10*torch.mean(std))
             critic_loss = torch.zeros((1))
-            print("predicted value: {}".format(value))
+            #print("predicted value: {}".format(value))
             for j in range(simulate.shape[0]):
-                advantage_actor = binary_rewards[j] - value_detached
-                advantage_critic = binary_rewards[j] - value
-                #advantage_critic = value
-                #advantage_actor = actual_rewards[j] - value_detached
-                #advantage_critic = actual_rewards[j] - value 
-                print("advantage: {} {}".format(advantage_actor, advantage_critic))
-                print(log_prob[j])
+                #advantage_actor = nn.BCELoss()(binary_rewards[j], 1)
+                advantage_actor = binary_rewards[j]
                 actor_loss += -advantage_actor * log_prob[j]
-                critic_loss += advantage_critic.pow(2)
-                #critic_loss += nn.MSELoss()(value, torch.tensor([normalized_rewards[j]]))
             #print("value: {}".format(self.normalize_reward(value, inverse=True))) 
-            print("entropy: {}, std: {}".format(entropy, std))
+            print("entropy: {}, std: {}".format(entropy, log_std))
             print("actor loss: {}, critic loss: {}, rewards: {}".format(actor_loss, critic_loss, np.mean(actual_rewards)))
-            print("avg reward (discounted): {}".format(sum_reward/weights_sum))
+            print("binary reward: {}".format(np.mean(binary_rewards.numpy())))
+
+            self.writer.add_scalar("Reward", np.mean(actual_rewards))
+            self.writer.add_scalar("Binary Reward", np.mean(binary_rewards.numpy()))
+            self.writer.add_scalar("Entropy", entropy)
+
+            if(weights_sum != 0):
+                print("avg reward (discounted): {}".format(sum_reward/weights_sum))
             #loss = actor_loss + self.k_critic * critic_loss 
             gen_optim.zero_grad()
-            actor_loss.backward(retain_graph=True)
+            actor_loss.backward()
+            nn.utils.clip_grad_norm_(self.generator.parameters(), 0.01)
             gen_optim.step()
+
+            sum_reward = sum_reward * self.reward_discount + np.mean(actual_rewards)
+            weights_sum = weights_sum * self.reward_discount + 1
             
             #val_optim.zero_grad()
             #critic_loss.backward()
