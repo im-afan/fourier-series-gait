@@ -44,8 +44,7 @@ class Generator(nn.Module):
 
     def forward(self, x):
         u = self.actor(x)
-        return torch.cat((u[:u.shape[0]//2], self.logstd))
-        #return u
+        return u
 
     def sample_gait(self, mean, dev, n=1):
         sz = 2*self.action_size*self.n_frequencies+1 
@@ -95,7 +94,7 @@ class Trainer:
         kp : float = 0.01,
         k_critic: float = 0.1,
         k_entropy: float = 0.003, # should be negative to maximize entropy ???
-        reward_discount: float = 0.2
+        reward_discount: float = 0.0
     ):
         #print("aciton size: ", action_size)
         self.action_size = action_size
@@ -230,7 +229,7 @@ class Trainer:
             #print(self.normalize_reward(value, inverse=True))
             #value_detached = value.detach()
 
-            np.savetxt("saved_agents/" + str(i) + ".npy", mean.detach().numpy())
+            np.savetxt("saved_agents/" + str(i) + ".txt", mean.detach().numpy())
            
             simulate, log_prob, entropy = self.generator.sample_gait(mean, torch.exp(log_std), n=batch_size) 
             simulate_agents = []
@@ -272,7 +271,7 @@ class Trainer:
             #loss = actor_loss + self.k_critic * critic_loss 
             gen_optim.zero_grad()
             actor_loss.backward()
-            nn.utils.clip_grad_norm_(self.generator.parameters(), 0.01)
+            nn.utils.clip_grad_norm_(self.generator.parameters(), 0.1)
             gen_optim.step()
 
             sum_reward = sum_reward * self.reward_discount + np.mean(actual_rewards)

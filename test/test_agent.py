@@ -1,6 +1,7 @@
 import sys
 import gymnasium as gym
 import numpy as np
+import util.fourier_series_agent
 
 def test_agent(agent):
     env = gym.make("Hopper-v4", render_mode="human", reset_noise_scale=0)
@@ -21,7 +22,7 @@ def test_agent(agent):
         # observation: thigh_joint=2, leg_joint=3, foot_joint=4
         joint_state = np.array([obs[2], obs[3], obs[4]])
 
-        wanted_state = agent[0].sample(i, deriv=False, norm=False) * 5
+        wanted_state = agent[0].sample(i, deriv=False, norm=False)
         print(i, wanted_state)
     
         action = self.kp * (wanted_state-joint_state)
@@ -37,7 +38,8 @@ def test_agent(agent):
         """
 
 if __name__ == "__main__":
-    agent_path = sys.argv[0]
+    agent_path = sys.argv[1]
     print(agent_path)
-    agent = np.load(agent_path, allow_pickle=True)
-    test_agent(agent)
+    agent = np.loadtxt(agent_path)
+    print(agent)
+    test_agent(fourier_series_agent.from_array(agent))
