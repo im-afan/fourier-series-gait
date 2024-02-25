@@ -38,13 +38,13 @@ class Generator(nn.Module):
             #nn.Sigmoid(),
         )
 
-        logstd_param = nn.Parameter(torch.ones(2*action_size*n_frequencies+1)*0.1)
+        logstd_param = nn.Parameter(2*torch.rand(2*action_size*n_frequencies+1) - 1)
         self.register_parameter("logstd", logstd_param)
         #print(self.logstd)
 
     def forward(self, x):
         u = self.actor(x)
-        return u
+        return torch.cat((u[:u.shape[0]//2], self.logstd))
 
     def sample_gait(self, mean, dev, n=1):
         sz = 2*self.action_size*self.n_frequencies+1 
@@ -93,8 +93,9 @@ class Trainer:
         val_hidden_size : int = 256,
         kp : float = 0.01,
         k_critic: float = 0.1,
-        k_entropy: float = 0.003, # should be negative to maximize entropy ???
-        reward_discount: float = 0.0
+        #k_entropy: float = -0.0001, # should be negative to maximize entropy ???
+        k_entropy: float = 0.1,
+        reward_discount: float = 0.5
     ):
         #print("aciton size: ", action_size)
         self.action_size = action_size
@@ -149,7 +150,7 @@ class Trainer:
             # observation: thigh_joint=2, leg_joint=3, foot_joint=4
             joint_state = np.array([obs[2], obs[3], obs[4]])
 
-            wanted_state = agents[0].sample(i, deriv=False, norm=False) * 5
+            wanted_state = agents[0].sample(i, deriv=False, norm=False)
         
             action = self.kp * (wanted_state-joint_state)
             obs, reward, _, _, _ = env.step(action)
@@ -186,6 +187,10 @@ class Trainer:
             joint_state = np.array([obs[:, 2], obs[:, 3], obs[:, 4]])
             joint_state = joint_state.T
 
+            # FOR HALF CHEETAH
+            # from documentation: action: bthigh, bshin, bfoot, fthigh, fshin, ffoot
+            # observation: bthigh=2, bshin=3, bfoot
+
             wanted_state = np.array([agents[j].sample(i, deriv=False, norm=False) for j in range(len(agents))]) * 5
         
             action = self.kp * (wanted_state-joint_state)
@@ -203,26 +208,27 @@ class Trainer:
         return total_reward
 
     def train(self, epochs=1000, batch_size=32, val_batch_size=100, value_samples=32):
-        gen_optim = torch.optim.RMSprop(self.generator.parameters(), lr=0.003)
+        gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.003)
         val_optim = torch.optim.Adam(self.value.parameters(), lr=0.01)
 
         torch.autograd.set_detect_anomaly(True)
-        #noise = torch.rand((self.gen_noise_size), dtype=torch.double)
+        noise = torch.rand((self.gen_noise_size), dtype=torch.double)
 
         sum_reward = 0
         weights_sum = 0
 
+        #noise = torch.normal(mean=torch.zeros((self.gen_noise_size)), std=torch.ones((self.gen_noise_size)))
         for i in range(epochs):
             print("epoch %d" % i)
 
-            #noise = torch.normal(mean=torch.zeros((self.gen_noise_size)), std=torch.ones((self.gen_noise_size)))
-            noise = torch.rand((self.gen_noise_size))
+            #noise = torch.rand((self.gen_noise_size))
             noise = torch.tensor(noise, dtype=torch.double)
 
             generated = self.generator(noise)
             sz = generated.shape[0]
             mean = generated[:sz//2]
             log_std = generated[sz//2:]
+            print("mean: ", mean)
             #print(log_std)
             #print(means.shape)
             #value = self.value(generated.detach())
@@ -271,7 +277,7 @@ class Trainer:
             #loss = actor_loss + self.k_critic * critic_loss 
             gen_optim.zero_grad()
             actor_loss.backward()
-            nn.utils.clip_grad_norm_(self.generator.parameters(), 0.1)
+            nn.utils.clip_grad_norm_(self.generator.parameters(), 0.01)
             gen_optim.step()
 
             sum_reward = sum_reward * self.reward_discount + np.mean(actual_rewards)
@@ -283,6 +289,7 @@ class Trainer:
 
 if __name__ == "__main__":
     env = gym.make("Hopper-v4", reset_noise_scale=0, render_mode="human")
+    #env = gym.make("Ant-v4", reset_noise_scale=0, render_mode="human")
     action_size = env.action_space.shape[0]
     trainer = Trainer(action_size=action_size)
     trainer.train()
