@@ -94,7 +94,7 @@ class Trainer:
         kp : float = 0.01,
         k_critic: float = 0.1,
         #k_entropy: float = -0.0001, # should be negative to maximize entropy ???
-        k_entropy: float = 0.1,
+        k_entropy: float = -0.1,
         reward_discount: float = 0.5
     ):
         #print("aciton size: ", action_size)
@@ -168,34 +168,38 @@ class Trainer:
 
 
     def vec_test(self, agents):
-        envs = gym.vector.make("Hopper-v4", num_envs=len(agents), reset_noise_scale=0)
+        #envs = gym.vector.make("Hopper-v4", num_envs=len(agents), reset_noise_scale=0.01, terminate_when_unhealthy=False)
+        envs = gym.vector.make("Ant-v4", num_envs=len(agents), reset_noise_scale=0.01, terminate_when_unhealthy=False, exclude_current_positions_from_observation=False)
 
         t = 0
         total_reward = np.zeros((len(agents)))
         obs, _ = envs.reset()
+        orig_x, orig_y = obs[:, 1], obs[:, 2]
 
         for i in range(1000):
             # FOR ANT
             # from documentation: action = hip_4, angle_4, hip_1, angle_1, hip_2, angle_2, hip_3, angle_3
             # observation: hip_4=11, ankle_4=12, hip_1=5, ankle_1=6, hip_2=7, ankle_2=8 hip_3=9, ankle_3=10
-            # joint_state = np.array([obs[:, 11], obs[:, 12], obs[:, 5], obs[:, 6], obs[:, 7], obs[:, 8], obs[:, 9], obs[:, 10]]) 
-            # joint_state = joint_state.T #magic!
+            joint_state = np.array([obs[:, 11], obs[:, 12], obs[:, 5], obs[:, 6], obs[:, 7], obs[:, 8], obs[:, 9], obs[:, 10]]) 
+            joint_state = joint_state.T #magic!
 
             # FOR HOPPER
             # from documentation: action: thigh_joint, leg_joint, foot_joint
             # observation: thigh_joint=2, leg_joint=3, foot_joint=4
-            joint_state = np.array([obs[:, 2], obs[:, 3], obs[:, 4]])
-            joint_state = joint_state.T
+            #joint_state = np.array([obs[:, 2], obs[:, 3], obs[:, 4]])
+            #joint_state = joint_state.T
 
             # FOR HALF CHEETAH
             # from documentation: action: bthigh, bshin, bfoot, fthigh, fshin, ffoot
             # observation: bthigh=2, bshin=3, bfoot
 
-            wanted_state = np.array([agents[j].sample(i, deriv=False, norm=False) for j in range(len(agents))]) * 5
+            wanted_state = np.array([agents[j].sample(i, deriv=False, norm=False) for j in range(len(agents))])
         
             action = self.kp * (wanted_state-joint_state)
             obs, reward, _, _, _ = envs.step(action)
-            total_reward += reward
+            #total_reward += reward
+            total_reward = (obs[:, 1]-orig_x)**2 + (obs[:, 2]-orig_y)**2
+            #print(obs[:, 1]**2, obs[:, 2]**2)
             t += 1
 
             """ logging for tests
@@ -208,7 +212,8 @@ class Trainer:
         return total_reward
 
     def train(self, epochs=1000, batch_size=32, val_batch_size=100, value_samples=32):
-        gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.003)
+        #gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.003)
+        gen_optim = torch.optim.Adam(self.generator.parameters(), lr=0.01)
         val_optim = torch.optim.Adam(self.value.parameters(), lr=0.01)
 
         torch.autograd.set_detect_anomaly(True)
@@ -235,9 +240,8 @@ class Trainer:
             #print(self.normalize_reward(value, inverse=True))
             #value_detached = value.detach()
 
-            np.savetxt("saved_agents/" + str(i) + ".txt", mean.detach().numpy())
-           
             simulate, log_prob, entropy = self.generator.sample_gait(mean, torch.exp(log_std), n=batch_size) 
+            np.savetxt("saved_agents/" + str(i) + ".txt", simulate[0].detach().numpy())
             simulate_agents = []
             for j in range(batch_size):
                 #agent = simulate[j].detach().numpy()
@@ -252,8 +256,11 @@ class Trainer:
             for j in range(len(actual_rewards)):
                 if(weights_sum == 0):
                     binary_rewards[j] = 1
-                elif(actual_rewards[j] >= sum_reward/weights_sum):
-                    binary_rewards[j] = 1 
+                else:
+                    binary_rewards[j] = actual_rewards[j] - sum_reward/weights_sum
+                #print(simulate_agents[j].L, actual_rewards[j])
+                #elif(actual_rewards[j] >= sum_reward/weights_sum):
+                #    binary_rewards[j] = 1 
 
             actor_loss = torch.ones((1)) * self.k_entropy * entropy
             #actor_loss = torch.ones((1)) * self.k_entropy * (10*torch.mean(std))
@@ -282,14 +289,16 @@ class Trainer:
 
             sum_reward = sum_reward * self.reward_discount + np.mean(actual_rewards)
             weights_sum = weights_sum * self.reward_discount + 1
+
+            torch.save(self.generator, "saved_generator.pth")
             
             #val_optim.zero_grad()
             #critic_loss.backward()
             #val_optim.step()
 
 if __name__ == "__main__":
-    env = gym.make("Hopper-v4", reset_noise_scale=0, render_mode="human")
-    #env = gym.make("Ant-v4", reset_noise_scale=0, render_mode="human")
+    #env = gym.make("Hopper-v4", reset_noise_scale=0, render_mode="human")
+    env = gym.make("Ant-v4", reset_noise_scale=0, render_mode="human")
     action_size = env.action_space.shape[0]
     trainer = Trainer(action_size=action_size)
     trainer.train()
